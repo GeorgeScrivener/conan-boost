@@ -13,6 +13,40 @@ lib_list = ['math', 'wave', 'container', 'contract', 'exception', 'graph', 'iost
             'atomic', 'filesystem', 'system', 'graph_parallel', 'python',
             'stacktrace', 'test', 'type_erasure']
 
+class ModifiedEnv:
+    """
+    Using CC with multiple variables breaks the build.
+    This class modifies the environment by moving any trailing CC, CXX & LD variables to their respective flags
+    """
+
+    vars_to_overflow = { "CC": "CFLAGS", "CXX": "CXXFLAGS", "LD": "LDFLAGS" }
+
+    def __init__(self):
+        self.initial_env = os.environ.copy()
+
+    def __enter__(self):
+        for flag, overflow_flag in self.vars_to_overflow.items():
+            split_flag = str(os.environ.get(flag, "")).split(" ")
+            if len(split_flag) < 2:
+                return
+            os.environ[flag] = split_flag[0]
+            os.environ[overflow_flag] = " ".join(split_flag[1:]) + " " + self.initial_env.get(overflow_flag, "")
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        def restore_flag(flag):
+            if os.environ.get(flag):
+                if self.initial_env.get(flag):
+                    os.environ[flag] = self.initial_env[flag]
+                else:
+                    os.environ.pop(flag)
+            else:
+                if self.initial_env.get(flag):
+                    os.environ[flag] = self.initial_env[flag]
+
+        for flag, overflow_flag in self.vars_to_overflow.items():
+            restore_flag(flag)
+            restore_flag(overflow_flag)
+
 
 class BoostConan(ConanFile):
     name = "boost"
@@ -82,29 +116,32 @@ class BoostConan(ConanFile):
             self.output.warn("Header only package, skipping build")
             return
 
-        if not self.options.without_python:
-            tools.patch(base_path=os.path.join(self.build_folder, self.folder_name), patch_file='patches/python_base_prefix.patch', strip=1)
+        with ModifiedEnv():
+            if not self.options.without_python:
+                tools.patch(base_path=os.path.join(self.build_folder, self.folder_name),
+                            patch_file='patches/python_base_prefix.patch', strip=1)
 
-        b2_exe = self.bootstrap()
-        flags = self.get_build_flags()
-        # Help locating bzip2 and zlib
-        self.create_user_config_jam(self.build_folder)
+            b2_exe = self.bootstrap()
+            flags = self.get_build_flags()
+            # Help locating bzip2 and zlib
+            self.create_user_config_jam(self.build_folder)
 
-        # JOIN ALL FLAGS
-        b2_flags = " ".join(flags)
-        full_command = "%s %s -j%s --abbreviate-paths -d2" % (b2_exe, b2_flags, tools.cpu_count())
-        # -d2 is to print more debug info and avoid travis timing out without output
-        sources = os.path.join(self.source_folder, self.folder_name)
-        full_command += ' --debug-configuration --build-dir="%s"' % self.build_folder
-        self.output.warn(full_command)
+            # JOIN ALL FLAGS
+            b2_flags = " ".join(flags)
+            full_command = "%s %s -j%s --abbreviate-paths -d2" % (b2_exe, b2_flags, tools.cpu_count())
+            # -d2 is to print more debug info and avoid travis timing out without output
+            sources = os.path.join(self.source_folder, self.folder_name)
+            full_command += ' --debug-configuration --build-dir="%s"' % self.build_folder
+            self.output.warn(full_command)
 
-        with tools.vcvars(self.settings) if self.settings.compiler == "Visual Studio" else tools.no_op():
-            with tools.chdir(sources):
-                # to locate user config jam (BOOST_BUILD_PATH)
-                with tools.environment_append({"BOOST_BUILD_PATH": self.build_folder}):
-                    # To show the libraries *1
-                    # self.run("%s --show-libraries" % b2_exe)
-                    self.run(full_command)
+            with tools.vcvars(self.settings) if self.settings.compiler == "Visual Studio" else tools.no_op():
+                with tools.chdir(sources):
+                    # to locate user config jam (BOOST_BUILD_PATH)
+                    with tools.environment_append({"BOOST_BUILD_PATH": self.build_folder}):
+                        # To show the libraries *1
+                        # self.run("%s --show-libraries" % b2_exe)
+                        self.run(full_command)
+
 
     def get_build_flags(self):
 
